@@ -148,8 +148,8 @@ def normalize_path(raw_path: object, user_text: str) -> list[str]:
 
 def fallback_classification(user_text: str) -> list[str]:
     lowered = user_text.lower()
-    best_leaf = "Unable to Plan"
-    best_score = -1
+    best_leaf = None
+    best_score = 0
 
     for leaf in LEAF_NODES:
         terms = [leaf.lower(), *FALLBACK_KEYWORDS.get(leaf, [])]
@@ -157,6 +157,9 @@ def fallback_classification(user_text: str) -> list[str]:
         if score > best_score:
             best_leaf = leaf
             best_score = score
+
+    if best_leaf is None:
+        return [ROOT]
 
     return NODE_PATHS[best_leaf]
 
@@ -247,6 +250,11 @@ Latest client message:
     if not counselor_response:
         if EXERCISE_PROVIDER == "openai" and error_message:
             counselor_response = f"OpenAI request failed: {error_message}"
+        elif barrier_path == [ROOT]:
+            counselor_response = (
+                "That sounds like things may be going okay right now. "
+                "What would you like exercise to look like for you?"
+            )
         else:
             leaf = barrier_path[-1] if barrier_path else "exercise"
             counselor_response = (
