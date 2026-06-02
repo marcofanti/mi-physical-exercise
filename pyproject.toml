@@ -1,0 +1,28 @@
+[project]
+name = "cami"
+version = "0.1.0"
+description = "CAMI motivational interviewing counselor agent and exercise chatbot UI."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "openai>=2.35.0",
+    "python-dotenv>=1.2.2",
+    "backoff>=2.2.1",
+    "regex>=2026.4.4",
+    "tqdm>=4.67.3",
+    "streamlit>=1.57.0",
+]
+
+[project.optional-dependencies]
+batch = [
+    "torch",
+    "torchvision",
+    "transformers",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+package = false
+

@@ -1,4 +1,8 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from agents import Env, CAMI, Client
+from agents.llm import DEFAULT_MODEL
 import json
 from tqdm import tqdm
 import os
@@ -8,7 +12,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--model", type=str, help="OpenAI model to use for the agents")
+    parser.add_argument("--model", type=str, default=None, help="Model name to use (overrides LLM_PROVIDER default from .env)")
     parser.add_argument("--retriever_path", type=str, help="The retriever model to use in client simulation.")
     parser.add_argument("--wikipedia_dir", default="./wikipedias", type=str, help="The directory containing the wikipedia articles.")
     parser.add_argument(
@@ -28,6 +32,8 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    if args.model is None:
+        args.model = DEFAULT_MODEL
 
     with open(args.profile_path) as f:
         lines = f.readlines()

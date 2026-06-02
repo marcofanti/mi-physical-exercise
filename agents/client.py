@@ -1,51 +1,46 @@
 import backoff
 import openai
-from openai import OpenAI
 import numpy as np
 import os
+import re
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import heapq
 import random
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
-
-openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+from .llm import client as openai_client, DEFAULT_MODEL
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.RateLimitError,
-        openai.Timeout,
-        openai.APIError,
-        openai.APIConnectionError,
-        openai.APIStatusError,
-    ),
+def _is_fatal_api_error(e: Exception) -> bool:
+    """Stop retrying on client errors (4xx) except rate limits (429)."""
+    if isinstance(e, openai.APIStatusError):
+        return 400 <= e.status_code < 500 and e.status_code != 429
+    return False
+
+
+_RETRY_EXCEPTIONS = (
+    openai.RateLimitError,
+    openai.APITimeoutError,
+    openai.APIConnectionError,
+    openai.APIStatusError,
+    openai.InternalServerError,
 )
-def get_precise_response(messages, model="gpt-4o-2024-08-06", temperature=0.2, top_p=0.1):
+_BACKOFF_KWARGS = dict(giveup=_is_fatal_api_error, max_tries=5)
+
+
+@backoff.on_exception(backoff.expo, _RETRY_EXCEPTIONS, **_BACKOFF_KWARGS)
+def get_precise_response(messages, model=DEFAULT_MODEL, temperature=0.2, top_p=0.1):
     message = openai_client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
         top_p=top_p,
     )
-    return message.choices[0].message.content
+    return message.choices[0].message.content or ""
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.RateLimitError,
-        openai.Timeout,
-        openai.APIError,
-        openai.APIConnectionError,
-        openai.APIStatusError,
-    ),
-)
+@backoff.on_exception(backoff.expo, _RETRY_EXCEPTIONS, **_BACKOFF_KWARGS)
 def get_chatbot_response(
-    messages, model="gpt-4o-2024-08-06", temperature=0.7, top_p=0.8, max_tokens=100
+    messages, model=DEFAULT_MODEL, temperature=0.7, top_p=0.8, max_tokens=100
 ):
     message = openai_client.chat.completions.create(
         model=model,
@@ -54,20 +49,11 @@ def get_chatbot_response(
         top_p=top_p,
         max_tokens=100,
     )
-    return message.choices[0].message.content
+    return message.choices[0].message.content or ""
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.RateLimitError,
-        openai.Timeout,
-        openai.APIError,
-        openai.APIConnectionError,
-        openai.APIStatusError,
-    ),
-)
-def get_json_response(messages, model="gpt-4o-2024-08-06", temperature=0.2, top_p=0.1):
+@backoff.on_exception(backoff.expo, _RETRY_EXCEPTIONS, **_BACKOFF_KWARGS)
+def get_json_response(messages, model=DEFAULT_MODEL, temperature=0.2, top_p=0.1):
     message = openai_client.chat.completions.create(
         model=model,
         messages=messages,
@@ -75,7 +61,7 @@ def get_json_response(messages, model="gpt-4o-2024-08-06", temperature=0.2, top_
         top_p=top_p,
         response_format={"type": "json_object"},
     )
-    return message.choices[0].message.content
+    return message.choices[0].message.content or ""
 
 
 stage2description = {
@@ -806,10 +792,10 @@ Provide your response in JSON format, ensuring that the sum of all probabilities
             response = get_json_response(
                 messages=[{"role": "user", "content": prompt}], model=self.model
             )
-            response = response.replace("```", "").replace("json", "")
+            response = re.sub(r"```(?:json)?\s*|\s*```", "", response).strip()
             try:
                 context_aware_action_distribution = eval(response)
-            except SyntaxError:
+            except Exception:
                 continue
             if context_aware_action_distribution:
                 break

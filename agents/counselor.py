@@ -1,31 +1,36 @@
 import backoff
+import json
+import logging
 import openai
-from openai import OpenAI
 import os
 import re
 import random
-from openai.types.chat.completion_create_params import ResponseFormatJSONObject
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from .llm import client as openai_client, DEFAULT_MODEL
+
+_log = logging.getLogger("cami.counselor")
 
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+def _is_fatal_api_error(e: Exception) -> bool:
+    """Stop retrying on client errors (4xx) except rate limits (429)."""
+    if isinstance(e, openai.APIStatusError):
+        return 400 <= e.status_code < 500 and e.status_code != 429
+    return False
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
-
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.RateLimitError,
-        openai.Timeout,
-        openai.APIError,
-        openai.APIConnectionError,
-        openai.APIStatusError,
-        openai.InternalServerError,
-    ),
+_RETRY_EXCEPTIONS = (
+    openai.RateLimitError,
+    openai.APITimeoutError,
+    openai.APIConnectionError,
+    openai.APIStatusError,
+    openai.InternalServerError,
 )
+_BACKOFF_KWARGS = dict(giveup=_is_fatal_api_error, max_tries=5)
+
+
+@backoff.on_exception(backoff.expo, _RETRY_EXCEPTIONS, **_BACKOFF_KWARGS)
 def get_chatbot_response(
-    messages, model="gpt-4o-2024-08-06", temperature=0.7, top_p=0.8, max_tokens=150
+    messages, model=DEFAULT_MODEL, temperature=0.7, top_p=0.8, max_tokens=700
 ):
     message = openai_client.chat.completions.create(
         model=model,
@@ -34,22 +39,12 @@ def get_chatbot_response(
         top_p=top_p,
         max_tokens=max_tokens,
     )
-    return message.choices[0].message.content
+    return message.choices[0].message.content or ""
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.RateLimitError,
-        openai.Timeout,
-        openai.APIError,
-        openai.APIConnectionError,
-        openai.APIStatusError,
-        openai.InternalServerError,
-    ),
-)
+@backoff.on_exception(backoff.expo, _RETRY_EXCEPTIONS, **_BACKOFF_KWARGS)
 def get_precise_response(
-    messages, model="gpt-4o-2024-08-06", temperature=0.2, top_p=0.1, max_tokens=150
+    messages, model=DEFAULT_MODEL, temperature=0.2, top_p=0.1, max_tokens=700
 ):
     message = openai_client.chat.completions.create(
         model=model,
@@ -58,37 +53,26 @@ def get_precise_response(
         top_p=top_p,
         max_tokens=max_tokens,
     )
-    return message.choices[0].message.content
+    return message.choices[0].message.content or ""
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.RateLimitError,
-        openai.Timeout,
-        openai.APIError,
-        openai.APIConnectionError,
-        openai.APIStatusError,
-        openai.InternalServerError,
-    ),
-)
+@backoff.on_exception(backoff.expo, _RETRY_EXCEPTIONS, **_BACKOFF_KWARGS)
 def get_json_response(
-    messages, model="gpt-4o-2024-08-06", temperature=0.2, top_p=0.1, max_tokens=150
+    messages, model=DEFAULT_MODEL, temperature=0.2, top_p=0.1, max_tokens=700
 ):
-    format = ResponseFormatJSONObject()
     message = openai_client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
-        response_format=format,
+        response_format={"type": "json_object"},
     )
-    return message.choices[0].message.content
+    return message.choices[0].message.content or ""
 
 
 class CAMI:
-    def __init__(self, goal, behavior, model):
+    def __init__(self, goal, behavior, model, fast_mode=False, enable_refinement=True):
         self.state2instruction = {
             "Precontemplation": "The Client does not recognize their behavior as problematic and is not considering change.",
             "Contemplation": "The Client acknowledges the problematic nature of their behavior but is ambivalent about change.",
@@ -194,11 +178,9 @@ At the core of MI are a few basic principles, including expressing empathy and d
             "Academic Achievement": f"You can explore how {behavior} affects GPA, potentially leading to academic probation or reduced learning outcomes. You can also discuss how {goal} enhances academic standing."
         }
         first_counselor = """Counselor: Hello. How are you?"""
-        first_client = """Client: I am good. What about you?"""
         self.messages = [
             {"role": "system", "content": system_prompt},
             {"role": "assistant", "content": first_counselor},
-            {"role": "user", "content": first_client},
         ]
         self.model = model
         self.goal = goal
@@ -301,9 +283,14 @@ At the core of MI are a few basic principles, including expressing empathy and d
             "Scholarship": {"Parent": ["Student Affairs"], "Children": []}
         }
         self.explored_topics = []
-        self.conversation = [first_counselor, first_client]
+        self.conversation = [first_counselor]
         self.topic_stack = []
         self.initialized = False
+        self.fast_mode = fast_mode
+        self.enable_refinement = enable_refinement
+
+    def recent_context(self, turns=10):
+        return self.conversation[-turns:]
 
     def infer_state(self):
         prompt = """During the Motivational Interviewing counseling conversation, the client may exhibit different states that refer to their readiness to change. The client's state can be one of the following:
@@ -382,7 +369,7 @@ In this conversation, the client shows significant progress in their thinking ab
 
 ### State Inference
 """
-        prompt = prompt.replace("[@context]", "\n- ".join(self.conversation[-10:]))
+        prompt = prompt.replace("[@context]", "\n- ".join(self.recent_context()))
         response = get_precise_response(
             messages=[{"role": "user", "content": prompt}], model=self.model
         )
@@ -425,7 +412,7 @@ Client’s State:
 
 Please analyse the current situation, then select appropriate strategies based on current topic and situation to motivate client after analysing. Remember, you can select up to 2 strategies.
 """
-        prompt = prompt.replace("[@context]", "\n".join(self.conversation))
+        prompt = prompt.replace("[@context]", "\n".join(self.recent_context()))
         prompt = prompt.replace("[@state]", f"{state}: {self.state2instruction[state]}")
         response = get_precise_response(
             messages=[{"role": "user", "content": prompt}], model=self.model
@@ -453,6 +440,8 @@ Please analyse the current situation, then select appropriate strategies based o
         ]:
             if action in response:
                 selected_actions.append(action)
+        if not selected_actions:
+            selected_actions = ["Open Question"]
         return response, selected_actions
 
     def initialize_topic(self):
@@ -522,7 +511,6 @@ The client acknowledges that there are other ways to unwind, such as going for a
         analysis_prompt = analysis_prompt.replace("[@response]", self.conversation[-1])
         analysis = get_precise_response(
             messages=[{"role": "user", "content": analysis_prompt}],
-            max_tokens=150,
             model=self.model,
         )
         json_prompt = """You are a counselor working with a client whose goal is to reduce drug use. After establishing a foundation of trust, your focus is now shifting to identifying specific topics that may motivate the client to change their behavior. These topics include **Health**, **Economy**, **Interpersonal Relationships**, **Law**, and Education. Your Task is to provide a distribution of the topic in a **JSON format** indicating which are most likely to engage the client based on the dialogue context, client's response and professor's analysis. The candidate topics and distribution are as follows:
@@ -603,13 +591,17 @@ The client acknowledges that there are other ways to unwind, such as going for a
             messages=[{"role": "user", "content": json_prompt}], model=self.model
         )
         try:
-            json_content = re.search(r"\{[^}]+\}", response).group()
-            topic_distribution = eval(json_content)
+            # Strip markdown code fences that some models (e.g. Gemini) add
+            clean = re.sub(r"```(?:json)?\s*|\s*```", "", response).strip()
+            match = re.search(r"\{[^}]+\}", clean)
+            if match is None:
+                raise ValueError("no JSON object in response")
+            topic_distribution = eval(match.group())
             topic = max(topic_distribution, key=topic_distribution.get)
             if topic_distribution[topic] > 0.5 or len(self.conversation) > 10:
                 self.topic_stack.append(topic)
                 self.initialized = True
-        except SyntaxError:
+        except Exception:
             topic = random.choice(
                 ["Health", "Economy", "Interpersonal Relationships", "Law", "Education"]
             )
@@ -775,7 +767,6 @@ Please analyze the client's feedback toward the current situation and then choos
                 )
         response = get_precise_response(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
             model=self.model,
         )
         action, topic = None, None
@@ -1013,7 +1004,8 @@ Please limit the word count to no more than 50 words!!!
 Please limit the word count to no more than 50 words!!!
 """
         context = "\n- ".join(context[-5:])
-        for _ in range(3):
+        _log.debug("  refine() input response: %r", response)
+        for iteration in range(3):
             temp_feedback_prompt = (
                 feedback_prompt.replace("[@context]", context)
                 .replace("[@response]", response)
@@ -1025,7 +1017,10 @@ Please limit the word count to no more than 50 words!!!
                 model=self.model
             )
             score = re.search(r"Total Score: (\d+)/10", feedback)
-            if score and int(score.group(1)) > 7:
+            score_val = int(score.group(1)) if score else None
+            _log.debug("  refine iter=%d  score=%s  feedback[:200]=%r", iteration, score_val, feedback[:200])
+            if score and score_val > 7:
+                _log.debug("  refine: score>7, keeping response unchanged")
                 break
             temp_refine_prompt = (
                 refine_prompt.replace("[@context]", context)
@@ -1034,37 +1029,59 @@ Please limit the word count to no more than 50 words!!!
                 .replace("[@strategy]", strategy)
                 .replace("[@feedback]", feedback)
             )
-            response = get_chatbot_response(
+            refined = get_chatbot_response(
                 messages=[{"role": "user", "content": temp_refine_prompt}],
                 model=self.model,
             )
-            for r in response.split("\n"):
+            _log.debug("  refine iter=%d  raw refined=%r", iteration, refined)
+            # Extract counselor line — try "- Counselor:" first, then bare "Counselor:"
+            extracted = None
+            for r in refined.split("\n"):
+                r = r.strip()
                 if r.startswith("- Counselor:"):
-                    response = r.replace("- Counselor:", "Counselor:")
+                    extracted = r.replace("- Counselor:", "Counselor:").strip()
                     break
+                if r.startswith("Counselor:"):
+                    extracted = r.strip()
+                    break
+            if extracted is None and "Counselor: " in refined:
+                extracted = "Counselor: " + refined.replace("\n", " ").split("Counselor: ", 1)[1].strip()
+            _log.debug("  refine iter=%d  extracted=%r", iteration, extracted)
+            if extracted:
+                response = extracted
+        _log.debug("  refine() output: %r", response)
         return response
 
     def generate(self, last_utterance, topic, state, selected_strategies):
         prompt = f"{last_utterance}\nBased on the previous counseling session, generate the response based on the following instruction and strategy: \nThe state of client is {state}, where {self.state2instruction[state]}\nThe client may interest about {topic}. {self.topic2description[topic]}\n"
         candidate_responses = {}
         strategies = {}
-        for strategy in selected_strategies:
-            temp_prompt = (
-                prompt
-                + f"The professional counselor suggests using the following strategy:\n- **{strategy}**: {self.strategy2description[strategy]}\nPlease generate one utterance following the suggested strategy and shorter than 50 words."
-            )
-            self.messages[-1]["content"] = temp_prompt
-            response = get_chatbot_response(
-                messages=self.messages, max_tokens=150, model=self.model
-            )
+
+        def clean_response(response):
             response = " ".join(response.split("\n"))
             response = response.replace("*", "").replace("#", "")
             if not response.startswith("Counselor: "):
                 response = f"Counselor: {response}"
             if "Client: " in response:
                 response = response.split("Client: ")[0]
-            candidate_responses[len(candidate_responses)] = response
-            strategies[len(strategies)] = strategy
+            return response
+
+        def generate_for_strategy(strategy):
+            temp_prompt = (
+                prompt
+                + f"The professional counselor suggests using the following strategy:\n- **{strategy}**: {self.strategy2description[strategy]}\nPlease generate one utterance following the suggested strategy and shorter than 50 words."
+            )
+            messages = self.messages[:-1] + [{"role": "user", "content": temp_prompt}]
+            response = get_chatbot_response(messages=messages, model=self.model)
+            return strategy, clean_response(response)
+
+        with ThreadPoolExecutor(max_workers=max(1, min(3, len(selected_strategies)))) as executor:
+            futures = [executor.submit(generate_for_strategy, strategy) for strategy in selected_strategies]
+            for future in as_completed(futures):
+                strategy, response = future.result()
+                candidate_responses[len(candidate_responses)] = response
+                strategies[len(strategies)] = strategy
+
         temp_prompt = (
             prompt
             + "The professional counselor suggests using the following startegies:\n"
@@ -1072,16 +1089,11 @@ Please limit the word count to no more than 50 words!!!
         for strategy in selected_strategies:
             temp_prompt += f"- **{strategy}**: {self.strategy2description[strategy]}\n"
         temp_prompt += "Please generate a response combining all the suggested strategies. The generated utterance should be precise and shorter than 50 words."
-        self.messages[-1]["content"] = temp_prompt
+        combined_messages = self.messages[:-1] + [{"role": "user", "content": temp_prompt}]
         response = get_chatbot_response(
-            messages=self.messages, max_tokens=150, model=self.model
+            messages=combined_messages, model=self.model
         )
-        response = " ".join(response.split("\n"))
-        response = response.replace("*", "").replace("#", "")
-        if not response.startswith("Counselor: "):
-            response = f"Counselor: {response}"
-        if "Client: " in response:
-            response = response.split("Client: ")[0]
+        response = clean_response(response)
         candidate_responses[len(candidate_responses)] = response
         strategies[len(strategies)] = "Combined Strategies"
         respnose_select_prompt = f"""You will act as a skilled counselor conducting a Motivational Interviewing (MI) session aimed at achieving {self.goal} related to the client's behavior, {self.behavior}. Your task is to help the client discover their inherent motivation to change and identify a tangible plan to change. The current state of the counseling session is as follows:
@@ -1095,7 +1107,7 @@ At this point, multiple responses have been generated based on the client’s cu
 Please choose the most suitable response based on the counseling context and the client's motivational state. Reply with the ID of the response you find most appropriate for the current situation.
 """
         respnose_select_prompt = respnose_select_prompt.replace(
-            "[@conversation]", "- " + "\n- ".join(self.conversation)
+            "[@conversation]", "- " + "\n- ".join(self.recent_context())
         )
         respnose_select_prompt = respnose_select_prompt.replace(
             "[@responses]",
@@ -1105,48 +1117,180 @@ Please choose the most suitable response based on the counseling context and the
         )
         response = get_precise_response(
             messages=[{"role": "user", "content": respnose_select_prompt}],
-            max_tokens=150,
             model=self.model,
         )
         for i in candidate_responses.keys():
             if str(i + 1) in response:
                 return candidate_responses[i], strategies[i]
-        return candidate_responses[2], strategies[2]
+        last = max(candidate_responses.keys())
+        return candidate_responses[last], strategies[last]
+
+    def _parse_fast_json(self, raw):
+        clean = re.sub(r"```(?:json)?\s*|\s*```", "", raw or "").strip()
+        match = re.search(r"\{.*\}", clean, flags=re.DOTALL)
+        if match:
+            clean = match.group()
+        return json.loads(clean)
+
+    def reply_fast(self):
+        topics = list(self.topic2description.keys())
+        strategies = [
+            "Advise",
+            "Affirm",
+            "Emphasize Control",
+            "Open Question",
+            "Simple Reflection",
+            "Complex Reflection",
+            "Reframe",
+            "Support",
+        ]
+        recent_context = "\n- ".join(self.recent_context(6))
+        prompt = f"""You are a skilled Motivational Interviewing counselor.
+Goal: {self.goal}
+Client behavior: {self.behavior}
+
+Use the recent conversation to do all of this in one pass:
+1. infer readiness stage: Precontemplation, Contemplation, or Preparation
+2. choose one topic from the topic list
+3. choose one MI strategy from the strategy list
+4. write one counselor reply under 50 words
+
+Do not mention motivational interviewing, readiness stages, strategies, or topic labels to the client.
+If the client is not ready, reflect and ask an open question. If ready, ask permission before advice or suggest one small step.
+
+Topic list: {topics}
+Strategy list: {strategies}
+
+Recent conversation:
+- {recent_context}
+
+Return only JSON:
+{{
+  "state": "Contemplation",
+  "topic": "Physical Activity",
+  "strategy": "Open Question",
+  "analysis": "brief rationale",
+  "response": "Counselor: ..."
+}}
+"""
+        try:
+            raw = get_json_response(
+                messages=[{"role": "user", "content": prompt}],
+                model=self.model,
+                max_tokens=500,
+            )
+            parsed = self._parse_fast_json(raw)
+        except Exception as exc:
+            _log.warning("reply_fast fallback after JSON error: %s", exc)
+            parsed = {}
+
+        state = parsed.get("state", "Contemplation")
+        if state not in self.state2instruction:
+            state = "Contemplation"
+
+        topic = parsed.get("topic", "Physical Activity")
+        if topic not in self.topic2description:
+            topic = "Physical Activity"
+
+        final_strategy = parsed.get("strategy", "Open Question")
+        if final_strategy not in self.strategy2description:
+            final_strategy = "Open Question"
+
+        strategy_analysis = parsed.get("analysis", "Fast one-pass inference.")
+        response = parsed.get("response", "")
+        response = " ".join(str(response).split())
+        response = response.replace("*", "").replace("#", "")
+        if "Counselor: " in response:
+            response = "Counselor: " + response.split("Counselor: ", 1)[1]
+        elif not response.startswith("Counselor:"):
+            response = f"Counselor: {response}"
+
+        self.explored_topics.append(topic)
+        self.topic_stack = [topic]
+        self.initialized = True
+        self.messages.append({"role": "assistant", "content": response})
+        self.conversation.append(response)
+
+        raw = f"[Inferred State: {state} || Strategy Selection: {strategy_analysis} || Strategies: ['{final_strategy}'] || Final Strategy: {final_strategy} || Topic: {topic} || Exploration Action: Fast Mode || Exploration: One-pass state, topic, strategy, and response generation.] {response}"
+        return raw
 
     def receive(self, response):
         self.messages.append({"role": "user", "content": response})
         self.conversation.append(response)
 
     def reply(self):
+        if self.fast_mode:
+            return self.reply_fast()
+
+        _log.debug("─" * 60)
+        _log.debug("reply() START")
+
         state = self.infer_state()
+        _log.debug("STATE: %s", state)
+
         if not self.initialized:
             exploration, action, topic = self.initialize_topic()
         else:
             exploration, action, topic = self.explore()
         self.explored_topics.append(topic)
+        _log.debug("TOPIC: %s  ACTION: %s", topic, action)
+        _log.debug("EXPLORATION:\n%s", exploration)
+
         strategy_analysis, selected_strategies = self.select_strategy(state)
+        _log.debug("STRATEGIES: %s", selected_strategies)
+        _log.debug("STRATEGY ANALYSIS:\n%s", strategy_analysis)
+
         last_utterance = self.messages[-1]["content"]
+        _log.debug("LAST UTTERANCE: %r", last_utterance)
+
         response, final_strategy = self.generate(
             last_utterance, topic, state, selected_strategies
         )
+        _log.debug("GENERATE OUTPUT  strategy=%r  response=%r", final_strategy, response)
+
         if final_strategy == "Combined Strategies":
-            final_strategy = " + ".join(selected_strategies)
-            strategy_description = (
-                self.strategy2description[selected_strategies[0]]
-                + "\n- "
-                + self.strategy2description[selected_strategies[1]]
-            )
+            final_strategy = " + ".join(selected_strategies) if selected_strategies else "No Strategy"
+            if len(selected_strategies) >= 2:
+                strategy_description = (
+                    self.strategy2description[selected_strategies[0]]
+                    + "\n- "
+                    + self.strategy2description[selected_strategies[1]]
+                )
+            elif len(selected_strategies) == 1:
+                strategy_description = self.strategy2description[selected_strategies[0]]
+            else:
+                strategy_description = self.strategy2description["No Strategy"]
         else:
-            strategy_description = self.strategy2description[final_strategy]
+            strategy_description = self.strategy2description.get(
+                final_strategy, self.strategy2description["No Strategy"]
+            )
+
         response = response.replace("\n", " ").strip().lstrip()
-        response = self.refine(
-            self.conversation[-5:],
-            response,
-            strategy_description,
-            self.topic2description[topic],
-        )
+        _log.debug("PRE-REFINE: %r", response)
+
+        if self.enable_refinement:
+            response = self.refine(
+                self.conversation[-5:],
+                response,
+                strategy_description,
+                self.topic2description[topic],
+            )
+            _log.debug("POST-REFINE: %r", response)
+        else:
+            _log.debug("REFINE SKIPPED")
+
         response = response.replace("\n", " ").strip().lstrip()
+        # Guarantee "Counselor: " prefix so app.py parse_reply always finds "] Counselor: "
+        if "Counselor: " in response:
+            response = "Counselor: " + response.split("Counselor: ", 1)[1]
+        elif not response.startswith("Counselor:"):
+            response = f"Counselor: {response}"
+        _log.debug("FINAL RESPONSE: %r", response)
+
         self.messages[-1]["content"] = last_utterance
         self.messages.append({"role": "assistant", "content": response})
         self.conversation.append(response)
-        return f"[Inferred State: {state} || Strategy Selection: {strategy_analysis} || Strategies: {selected_strategies} || Final Strategy: {final_strategy} || Topic: {topic} || Exploration Action: {action} || Exploration: {exploration}] {response}"
+        raw = f"[Inferred State: {state} || Strategy Selection: {strategy_analysis} || Strategies: {selected_strategies} || Final Strategy: {final_strategy} || Topic: {topic} || Exploration Action: {action} || Exploration: {exploration}] {response}"
+        _log.debug("RAW REPLY (first 300 chars): %r", raw[:300])
+        _log.debug("─" * 60)
+        return raw

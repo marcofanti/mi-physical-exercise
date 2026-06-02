@@ -1,0 +1,14 @@
+# Core — needed for both the Streamlit UI and batch simulation
+openai>=2.35.0
+python-dotenv>=1.2.2
+backoff>=2.2.1
+regex>=2026.4.4
+tqdm>=4.67.3
+
+# Streamlit UI (app.py)
+streamlit>=1.57.0
+
+# Batch simulation only (generate.py) — comment out if running UI only
+# torch
+# torchvision
+# transformers
