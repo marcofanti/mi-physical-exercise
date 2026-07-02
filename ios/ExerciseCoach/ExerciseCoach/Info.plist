@@ -22,12 +22,16 @@
 	<string>1</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>ExerciseCoach reads your step count and workouts so the counselor can ground the conversation in your real activity. Health data never leaves your device.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>ExerciseCoach reads your step count and workouts so the counselor can ground the conversation in your real activity. Health data never leaves your device.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>ExerciseCoach uses the microphone so you can talk to your exercise counselor instead of typing.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Your speech is transcribed on this device so the counselor can understand what you say. Nothing is sent to a server.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

@@ -26,6 +26,7 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        UIRequiresFullScreen: true
         NSMicrophoneUsageDescription: >-
           ExerciseCoach uses the microphone so you can talk to your exercise
           counselor instead of typing.
