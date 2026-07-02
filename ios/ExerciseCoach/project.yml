@@ -1,0 +1,71 @@
+name: ExerciseCoach
+options:
+  bundleIdPrefix: com.mfanti
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  ExerciseCoach:
+    type: application
+    platform: iOS
+    sources:
+      - ExerciseCoach
+    info:
+      path: ExerciseCoach/Info.plist
+      properties:
+        CFBundleDisplayName: ExerciseCoach
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSMicrophoneUsageDescription: >-
+          ExerciseCoach uses the microphone so you can talk to your exercise
+          counselor instead of typing.
+        NSSpeechRecognitionUsageDescription: >-
+          Your speech is transcribed on this device so the counselor can
+          understand what you say. Nothing is sent to a server.
+        NSHealthShareUsageDescription: >-
+          ExerciseCoach reads your step count and workouts so the counselor
+          can ground the conversation in your real activity. Health data
+          never leaves your device.
+    entitlements:
+      path: ExerciseCoach/ExerciseCoach.entitlements
+      properties:
+        com.apple.developer.healthkit: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mfanti.exercisecoach
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+
+  ExerciseCoachTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - ExerciseCoachTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: ExerciseCoach
+
+schemes:
+  ExerciseCoach:
+    build:
+      targets:
+        ExerciseCoach: all
+        ExerciseCoachTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - ExerciseCoachTests
